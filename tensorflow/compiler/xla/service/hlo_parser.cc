@@ -552,31 +552,37 @@ bool HloParserImpl::ParseAliasing(AliasingData* data) {
       return false;
     }
 
-    if (lexer_.GetKind() != TokKind::kLparen) {
-      // Short form: "{0}: 0", output index "{}" is assumed.
-      int64 param_num;
-      ParseInt64(&param_num);
-      data->emplace(std::piecewise_construct, std::forward_as_tuple(out),
-                    std::forward_as_tuple(param_num, ShapeIndex{}));
-    } else {
-      // Long form: "{0}: (0, {0})", output index is explicitly specified.
-      if (!ParseToken(TokKind::kLparen, errmsg)) {
-        return false;
+    if (!ParseToken(TokKind::kLparen, errmsg)) {
+      return false;
+    }
+    int64 param_num;
+    ParseInt64(&param_num);
+    if (!ParseToken(TokKind::kComma, errmsg)) {
+      return false;
+    }
+    ShapeIndex param_idx;
+    if (!ParseShapeIndex(&param_idx)) {
+      return false;
+    }
+
+    HloInputOutputAliasConfig::AliasKind alias_kind =
+        HloInputOutputAliasConfig::kMayAlias;
+    if (EatIfPresent(TokKind::kComma)) {
+      std::string type;
+      ParseName(&type);
+      if (type == "must-alias") {
+        alias_kind = HloInputOutputAliasConfig::kMustAlias;
+      } else if (type == "may-alias") {
+        alias_kind = HloInputOutputAliasConfig::kMayAlias;
+      } else {
+        return TokenError("Unexpected aliasing kind; expected SYSTEM or USER");
       }
-      int64 param_num;
-      ParseInt64(&param_num);
-      if (!ParseToken(TokKind::kComma, errmsg)) {
-        return false;
-      }
-      ShapeIndex param_idx;
-      if (!ParseShapeIndex(&param_idx)) {
-        return false;
-      }
-      data->emplace(std::piecewise_construct, std::forward_as_tuple(out),
-                    std::forward_as_tuple(param_num, param_idx));
-      if (!ParseToken(TokKind::kRparen, errmsg)) {
-        return false;
-      }
+    }
+
+    data->emplace(std::piecewise_construct, std::forward_as_tuple(out),
+                  std::forward_as_tuple(param_num, param_idx, alias_kind));
+    if (!ParseToken(TokKind::kRparen, errmsg)) {
+      return false;
     }
 
     if (!EatIfPresent(TokKind::kComma)) {
@@ -624,8 +630,9 @@ bool HloParserImpl::ParseHloModule(HloModule* module) {
   if (aliasing_data) {
     HloInputOutputAliasConfig alias_config(module->result_shape());
     for (auto& p : *aliasing_data) {
-      Status st = alias_config.SetUpAlias(p.first, p.second.parameter_number,
-                                          p.second.parameter_index);
+      Status st =
+          alias_config.SetUpAlias(p.first, p.second.parameter_number,
+                                  p.second.parameter_index, p.second.kind);
       if (!st.ok()) {
         return TokenError(st.error_message());
       }
@@ -2129,6 +2136,7 @@ bool HloParserImpl::ParseSingleSharding(OpSharding* sharding,
   LocTy loc = lexer_.GetLoc();
   bool maximal = false;
   bool replicated = false;
+  bool last_tile_dim_replicate = false;
   std::vector<int64> devices;
   std::vector<int64> tile_assignment_dimensions;
   while (lexer_.GetKind() != TokKind::kRbrace) {
@@ -2180,6 +2188,10 @@ bool HloParserImpl::ParseSingleSharding(OpSharding* sharding,
         }
         break;
       }
+      case TokKind::kw_last_tile_dim_replicate:
+        last_tile_dim_replicate = true;
+        lexer_.Lex();
+        break;
       case TokKind::kRbrace:
         break;
       default:
@@ -2218,6 +2230,7 @@ bool HloParserImpl::ParseSingleSharding(OpSharding* sharding,
     for (int64 device : devices) {
       sharding->add_tile_assignment_devices(device);
     }
+    sharding->set_replicate_on_last_tile_dim(last_tile_dim_replicate);
   }
 
   lexer_.Lex();
@@ -3599,7 +3612,7 @@ bool HloParserImpl::ParseHloComputationList(
     if (!ParseHloComputation(&computation)) {
       return false;
     }
-    LOG(INFO) << "parsed computation " << computation->name();
+    VLOG(3) << "parsed computation " << computation->name();
     result->push_back(computation);
     return true;
   };
@@ -4117,7 +4130,7 @@ bool HloParserImpl::ParseFftType(FftType* result) {
 }
 
 bool HloParserImpl::ParseComparisonDirection(ComparisonDirection* result) {
-  VLOG(1) << "ParseComparisonDirection";
+  VLOG(3) << "ParseComparisonDirection";
   if (lexer_.GetKind() != TokKind::kIdent) {
     return TokenError("expects comparison direction");
   }

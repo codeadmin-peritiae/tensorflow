@@ -291,12 +291,6 @@ CostAnalysisPrefetchIntervalPicker::CostAnalysisPrefetchIntervalPicker(
     // To avoid double counting, don't include the elapsed time of while and
     // conditional HLOs.
     const HloInstruction* instruction = instruction_and_logical_time.first;
-    if (instruction->opcode() == HloOpcode::kWhile ||
-        instruction->opcode() == HloOpcode::kConditional) {
-      continue;
-    }
-    float elapsed_time = cost_analysis_.GetInstructionElapsed(
-        *instruction_and_logical_time.first);
     int64 logical_time = instruction_and_logical_time.second;
     if (logical_time >= instructions_elapsed_time.size()) {
       instructions_elapsed_time.resize(logical_time + 1, 0.0);
@@ -305,6 +299,12 @@ CostAnalysisPrefetchIntervalPicker::CostAnalysisPrefetchIntervalPicker(
     int nest_level = cost_analysis_.CalculateWhileLoopNestLevel(
         instruction_and_logical_time.first);
     while_nest_level_[logical_time] = nest_level;
+    if (instruction->opcode() == HloOpcode::kWhile ||
+        instruction->opcode() == HloOpcode::kConditional) {
+      continue;
+    }
+    float elapsed_time = cost_analysis_.GetInstructionElapsed(
+        *instruction_and_logical_time.first);
     instructions_elapsed_time[logical_time] =
         elapsed_time *
         tensorflow::MathUtil::IPow<float>(kWhileExecutionCount, nest_level);
@@ -572,6 +572,24 @@ absl::optional<float>
 CostAnalysisPrefetchIntervalPicker::BufferIntervalAlternateMemoryBenefit(
     const GlobalDecreasingSizeBestFitHeap::BufferInterval& interval) const {
   return cost_analysis_.GetMemoryBoundedness(interval);
+}
+
+bool MemorySpaceAssignment::Allocation::operator==(
+    const MemorySpaceAssignment::Allocation& other) const {
+  return defining_position() == other.defining_position() &&
+         uses() == other.uses() && memory_space() == other.memory_space() &&
+         chunk() == other.chunk() && start_time() == other.start_time() &&
+         end_time() == other.end_time() &&
+         is_copy_allocation() == other.is_copy_allocation();
+}
+
+bool MemorySpaceAssignment::CopyAllocation::operator==(
+    const MemorySpaceAssignment::CopyAllocation& other) const {
+  return static_cast<const Allocation&>(*this) ==
+             static_cast<const Allocation&>(other) &&
+         copy_done_schedule_before() == other.copy_done_schedule_before() &&
+         copy_start_schedule_after() == other.copy_start_schedule_after() &&
+         copy_start() == other.copy_start() && copy_done() == other.copy_done();
 }
 
 std::string MemorySpaceAssignment::AllocationValue::ToString() const {
@@ -953,6 +971,16 @@ HeapSimulator::Result AlternateMemoryBestFitHeap::Finish() {
     }
   }
 
+  for (const auto& interval : sorted_buffer_intervals) {
+    auto colocated_intervals = GetSortedColocatedIntervals(interval);
+    if (AreIntervalsReservedInAlternateMemory(colocated_intervals)) {
+      // Increment the reserved part of alternate memory so that it is not
+      // available for other buffers.
+      reserved_in_bytes_ += options_.size_fn(*interval.buffer);
+    }
+  }
+  VLOG(2) << "Total reserved bytes = " << reserved_in_bytes_;
+
   for (auto& interval : sorted_buffer_intervals) {
     if (!interval.need_allocation) {
       continue;
@@ -980,8 +1008,7 @@ HeapSimulator::Result AlternateMemoryBestFitHeap::Finish() {
 
     if (AreIntervalsReservedInAlternateMemory(colocated_intervals)) {
       VLOG(3) << "Interval " << interval.buffer->ToShortString()
-              << " is reserved in the alternate memory. Total reserved bytes = "
-              << reserved_in_bytes_;
+              << " is reserved in the alternate memory.";
       for (const BufferInterval* colocated_interval : colocated_intervals) {
         const HloValue* value = colocated_interval->buffer;
         // Color all of the aliased reserved buffers here because reserved
@@ -997,10 +1024,6 @@ HeapSimulator::Result AlternateMemoryBestFitHeap::Finish() {
               options_.alternate_memory_space);
         }
       }
-      // Increment the reserved part of alternate memory so that it is not
-      // available for other buffers. Since all colocated intervals should have
-      // the same size, just use the first one.
-      reserved_in_bytes_ += options_.size_fn(*colocated_intervals[0]->buffer);
       continue;
     }
 
@@ -2003,6 +2026,9 @@ int64 AlternateMemoryBestFitHeap::FindPrefetchEndTime(
     int64 latest_prefetch_time =
         options_.prefetch_interval_picker->LatestPrefetchStartTime(
             request.use->hlo_use, earliest_prefetch_time, prefetch_end_time);
+    VLOG(4) << "Latest prefetch start time = " << latest_prefetch_time
+            << ", earliest prefetch start time = " << earliest_prefetch_time
+            << ", prefetch end time = " << prefetch_end_time;
     // Return if we couldn't find a suitable prefetch start time.
     if (latest_prefetch_time < earliest_prefetch_time) {
       break;
@@ -2274,6 +2300,9 @@ bool IsCrossProgramPrefetchCandidate(
   return value.instruction()->parent() ==
              value.instruction()->GetModule()->entry_computation() &&
          value.instruction()->opcode() == HloOpcode::kParameter &&
+         (!value.shape().has_layout() ||
+          value.shape().layout().memory_space() !=
+              options.alternate_memory_space) &&
          value.index().size() == 1 && value.shape().IsArray() &&
          !value.uses().empty() &&
          options.size_fn(value) <= options.max_size_in_bytes &&
@@ -2542,6 +2571,8 @@ Status MemorySpaceAssignment::CopyAllocation::Process(
       HloOpcode::kCopyStart, producing_instruction));
   copy_done_ = computation->AddInstruction(
       HloInstruction::CreateUnary(shape, HloOpcode::kCopyDone, copy_start_));
+  VLOG(4) << "Created " << copy_start_->name()
+          << " for position: " << defining_position().ToString();
   // Update the allocation position with the copy done instruction so that if
   // there are further copies from it, it can find the correct position.
   defining_position_ = HloPosition{copy_done_, {}};

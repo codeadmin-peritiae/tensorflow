@@ -3,7 +3,7 @@
 #  ":platform" - Low-level and platform-specific Python code.
 
 load("//tensorflow:tensorflow.bzl", "py_strict_library")
-load("//tensorflow:tensorflow.bzl", "cc_header_only_library", "if_mlir", "if_not_windows", "if_tpu", "if_xla_available", "py_test", "py_tests", "tf_cc_shared_object", "tf_cc_test", "tf_cuda_library", "tf_enable_mlir_bridge", "tf_gen_op_wrapper_py")
+load("//tensorflow:tensorflow.bzl", "cc_header_only_library", "if_mlir", "if_not_windows", "if_xla_available", "py_test", "py_tests", "tf_cc_shared_object", "tf_cc_test", "tf_cuda_library", "tf_enable_mlir_bridge", "tf_gen_op_wrapper_py")
 
 # buildifier: disable=same-origin-load
 load("//tensorflow:tensorflow.bzl", "tf_monitoring_python_deps")
@@ -172,6 +172,7 @@ py_library(
         ":list_ops",
         ":manip_ops",
         ":map_fn",
+        ":map_ops",
         ":math_ops",
         ":metrics",
         ":nccl_ops",
@@ -1616,11 +1617,60 @@ py_library(
     ],
 )
 
+cc_library(
+    name = "op_def_util_cc",
+    srcs = ["framework/op_def_util.cc"],
+    hdrs = ["framework/op_def_util.h"],
+    deps = [
+        ":cpp_python_util",
+        ":safe_ptr",
+        "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+# Note: this target is only used for op_def_util_test.  It includes op_def_util.cc
+# directly in its srcs (rather than depending on the `op_def_util_cc` target) because
+# depending on that target adds dependencies that register objects; and since the
+# extension is built as a shared object in some kokoro tests, this causes those objects
+# to get registered multiple times (which fails).
+tf_python_pybind_extension(
+    name = "_op_def_util",
+    srcs = [
+        "framework/op_def_util.cc",
+        "framework/op_def_util_pybind.cc",
+    ],
+    hdrs = [
+        "framework/op_def_util.h",
+        "lib/core/safe_ptr.h",
+        "util/util.h",
+        "//tensorflow/c:headers",
+        "//tensorflow/c/eager:headers",
+    ],
+    module_name = "_op_def_util",
+    deps = [
+        ":pybind11_status",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core/platform:status",
+        "//third_party/python_runtime:headers",
+        "@com_google_absl//absl/strings",
+        "@pybind11",
+    ],
+)
+
+tf_py_test(
+    name = "op_def_util_test",
+    srcs = ["framework/op_def_util_test.py"],
+    python_version = "PY3",
+    tags = ["no_pip"],
+)
+
 py_library(
     name = "framework_ops",  # "ops" is already the name of a deprecated target
     srcs = ["framework/ops.py"],
     srcs_version = "PY2AND3",
     deps = [
+        ":_op_def_util",
         ":c_api_util",
         ":control_flow_util",
         ":device",
@@ -2758,6 +2808,7 @@ tf_gen_op_wrapper_private_py(
         "//learning/brain/python/ops:__pkg__",
         "//tensorflow/compiler/tests:__pkg__",
         "//tensorflow/python/kernel_tests:__pkg__",
+        "//tensorflow/python/kernel_tests/v1_compat_tests:__pkg__",
     ],
     deps = [
         "//tensorflow/c/kernels:bitcast_op_lib",
@@ -2902,6 +2953,10 @@ tf_gen_op_wrapper_private_py(
         "//learning/brain/python/ops:__pkg__",
         "//tensorflow/python/kernel_tests:__pkg__",
     ],
+    deps = [
+        "//tensorflow/c/kernels:summary_op_lib",
+        "//tensorflow/core:logging_ops_op_lib",
+    ],
 )
 
 tf_gen_op_wrapper_private_py(
@@ -3022,6 +3077,10 @@ tf_gen_op_wrapper_private_py(
 
 tf_gen_op_wrapper_private_py(
     name = "list_ops_gen",
+)
+
+tf_gen_op_wrapper_private_py(
+    name = "map_ops_gen",
 )
 
 tf_gen_op_wrapper_private_py(
@@ -3346,11 +3405,9 @@ cuda_py_test(
     python_version = "PY3",
     tags = [
         "guitar",
-        "manual",
         "multi_gpu",
-        "no_oss",
         "no_rocm",
-        "notap",
+        "no_windows",
     ],
     deps = [
         ":client_testlib",
@@ -3543,6 +3600,7 @@ py_library(
         ":functional_ops_gen",
         ":gradients_util",
         ":list_ops",
+        ":map_ops",
         ":pywrap_tf_session",
         ":tensor_array_ops",
         ":tensor_shape",
@@ -4199,6 +4257,16 @@ py_library(
     deps = [
         ":array_ops",
         ":list_ops_gen",
+    ],
+)
+
+py_library(
+    name = "map_ops",
+    srcs = ["ops/map_ops.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":array_ops",
+        ":map_ops_gen",
     ],
 )
 
@@ -4948,23 +5016,6 @@ cuda_py_test(
     ],
 )
 
-cuda_py_test(
-    name = "gradient_checker_test",
-    size = "medium",
-    srcs = ["ops/gradient_checker_test.py"],
-    python_version = "PY3",
-    deps = [
-        ":array_ops",
-        ":client_testlib",
-        ":framework_for_generated_wrappers",
-        ":math_ops",
-        ":nn_grad",
-        ":nn_ops",
-        ":platform",
-        "//third_party/py/numpy",
-    ],
-)
-
 py_test(
     name = "op_selector_test",
     srcs = ["ops/op_selector_test.py"],
@@ -5015,6 +5066,7 @@ cuda_py_test(
         ":gradients",
         ":init_ops",
         ":list_ops",
+        ":map_ops",
         ":math_grad",
         ":math_ops",
         ":nn_grad",
@@ -5068,7 +5120,7 @@ cuda_py_test(
     srcs = ["ops/image_ops_test.py"],
     data = ["//tensorflow/core:image_testdata"],
     python_version = "PY3",
-    shard_count = 5,
+    shard_count = 16,
     deps = [
         ":array_ops",
         ":client",
@@ -5085,6 +5137,7 @@ cuda_py_test(
         ":variables",
         "//tensorflow/core:protos_all_py",
         "//third_party/py/numpy",
+        "@absl_py//absl/testing:parameterized",
     ],
 )
 
@@ -6078,6 +6131,8 @@ pywrap_tensorflow_macro(
         "//tensorflow/core/debug",
         "//tensorflow/core/distributed_runtime:server_lib",
         "//tensorflow/core/platform:stacktrace_handler",
+        "//tensorflow/core/profiler/rpc:profiler_server_impl",
+        "//tensorflow/core/profiler/rpc/client:profiler_client_impl",
         "//tensorflow/core/profiler/internal:print_model_analysis",
         "//tensorflow/lite/delegates/flex:delegate",
         "//tensorflow/core/profiler/internal/cpu:python_tracer",
@@ -6093,8 +6148,6 @@ pywrap_tensorflow_macro(
         "@ngraph_tf//:ngraph_tf",
     ]) + if_xla_available([
         "//tensorflow/compiler/aot:tfcompile_lib",
-    ]) + if_tpu([
-        "//tensorflow/core/tpu:tpu_api_dlsym_initializer",
     ]) + if_static(extra_deps = ["//tensorflow/core/platform:tf32_utils"]),
 )
 
@@ -6153,6 +6206,8 @@ filegroup(
         "//tensorflow/core/profiler/internal:print_model_analysis",  # tfprof
         "//tensorflow/core/profiler/internal:traceme_recorder_impl",  # profiler
         "//tensorflow/core/profiler/lib:profiler_session_impl",  # profiler
+        "//tensorflow/core/profiler/rpc:profiler_server_impl",  # profiler
+        "//tensorflow/core/profiler/rpc/client:profiler_client_impl",  # profiler
         "//tensorflow/core/util:port",  # util_port
         "//tensorflow/core/util/tensor_bundle",  # checkpoint_reader
         "//tensorflow/lite/toco/python:toco_python_api",  # toco

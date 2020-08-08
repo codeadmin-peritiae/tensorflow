@@ -40,6 +40,7 @@ int64_t TpuPlatform_VisibleDeviceCount(SE_Platform* platform);
 int64_t TpuPlatform_TpuMemoryLimit(SE_Platform* platform);
 bool TpuPlatform_ShouldRegisterTpuDeviceToDeviceCopy(SE_Platform* platform);
 void* TpuPlatform_GetTopologyPtr(SE_Platform* platform);
+void* TpuPlatform_GetHostLocation(SE_Platform* platform);
 
 void TpuExecutor_Init(SE_StreamExecutor* executor, int device_ordinal,
                       SE_DeviceOptions* device_options, SE_Status* status);
@@ -181,6 +182,13 @@ void TpuTransferManager_WriteSingleTupleIndexTable(
     XLA_TransferManager* manager, SE_Stream* stream,
     SE_DeviceMemoryBase* elements, size_t elements_len, XLA_Shape* shape,
     SE_DeviceMemoryBase* region, SE_Status* status);
+void TpuTransferManager_GetInfeedLayout(XLA_Shape* shape,
+                                        XLA_Shape* infeed_shape);
+void TpuTransferManager_LinearizeToBuffers(
+    XLA_TransferManager* manager, XLA_Literal* c_literal, char*** buffers_array,
+    int64_t** buffers_size, int64_t* buffers_array_size, SE_Status* status);
+void TpuTransferManager_FreeBuffers(char** buffers_array, int64_t* buffers_size,
+                                    int64_t buffers_array_size);
 
 XLA_ComputationPlacer* TpuComputationPlacer_New();
 void TpuComputationPlacer_Free(XLA_ComputationPlacer* placer);
@@ -195,11 +203,15 @@ int TpuTopology_ChipBounds_Z(void* tpu_topology);
 bool TpuTopology_HasChip(void* tpu_topology, int x, int y, int z);
 void* TpuTopology_Core(void* tpu_topology, int x, int y, int z,
                        TpuCoreTypeEnum tpu_core_type, int index);
-int TpuCoreLocation_ChipCoordinates_X(void* tpu_core_location);
-int TpuCoreLocation_ChipCoordinates_Y(void* tpu_core_location);
-int TpuCoreLocation_ChipCoordinates_Z(void* tpu_core_location);
+int TpuTopology_IdForHost(void* tpu_topology, int x, int y, int z);
+void TpuCoreLocation_ChipCoordinates(void* tpu_core_location, int* x, int* y,
+                                     int* z);
+void TpuCoreLocation_HostCoordinates(void* tpu_core_location, int* x, int* y,
+                                     int* z);
 int TpuCoreLocation_Index(void* tpu_core_location);
 int TpuCoreLocation_Id(void* tpu_core_location);
+
+int TpuHostLocation_Id(void* tpu_host_location);
 
 // C API for XLA::Compiler interface
 
@@ -253,6 +265,7 @@ struct TfTpu_ExecutorApiFn {
   TFTPU_ADD_FN_IN_STRUCT(TpuPlatform_TpuMemoryLimit);
   TFTPU_ADD_FN_IN_STRUCT(TpuPlatform_ShouldRegisterTpuDeviceToDeviceCopy);
   TFTPU_ADD_FN_IN_STRUCT(TpuPlatform_GetTopologyPtr);
+  TFTPU_ADD_FN_IN_STRUCT(TpuPlatform_GetHostLocation);
 
   TFTPU_ADD_FN_IN_STRUCT(TpuExecutor_Init);
   TFTPU_ADD_FN_IN_STRUCT(TpuExecutor_Free);
@@ -330,6 +343,9 @@ struct TfTpu_ExecutorApiFn {
   TFTPU_ADD_FN_IN_STRUCT(TpuTransferManager_TransferLiteralFromDevice);
   TFTPU_ADD_FN_IN_STRUCT(TpuTransferManager_GetByteSizeRequirement);
   TFTPU_ADD_FN_IN_STRUCT(TpuTransferManager_WriteSingleTupleIndexTable);
+  TFTPU_ADD_FN_IN_STRUCT(TpuTransferManager_GetInfeedLayout);
+  TFTPU_ADD_FN_IN_STRUCT(TpuTransferManager_LinearizeToBuffers);
+  TFTPU_ADD_FN_IN_STRUCT(TpuTransferManager_FreeBuffers);
 
   TFTPU_ADD_FN_IN_STRUCT(TpuComputationPlacer_New);
   TFTPU_ADD_FN_IN_STRUCT(TpuComputationPlacer_Free);
@@ -341,15 +357,17 @@ struct TfTpu_ExecutorApiFn {
   TFTPU_ADD_FN_IN_STRUCT(TpuTopology_ChipBounds_Z);
   TFTPU_ADD_FN_IN_STRUCT(TpuTopology_HasChip);
   TFTPU_ADD_FN_IN_STRUCT(TpuTopology_Core);
-  TFTPU_ADD_FN_IN_STRUCT(TpuCoreLocation_ChipCoordinates_X);
-  TFTPU_ADD_FN_IN_STRUCT(TpuCoreLocation_ChipCoordinates_Y);
-  TFTPU_ADD_FN_IN_STRUCT(TpuCoreLocation_ChipCoordinates_Z);
+  TFTPU_ADD_FN_IN_STRUCT(TpuTopology_IdForHost);
+
+  TFTPU_ADD_FN_IN_STRUCT(TpuCoreLocation_ChipCoordinates);
+  TFTPU_ADD_FN_IN_STRUCT(TpuCoreLocation_HostCoordinates);
   TFTPU_ADD_FN_IN_STRUCT(TpuCoreLocation_Index);
   TFTPU_ADD_FN_IN_STRUCT(TpuCoreLocation_Id);
 
+  TFTPU_ADD_FN_IN_STRUCT(TpuHostLocation_Id);
+
   TFTPU_ADD_FN_IN_STRUCT(TpuCompiler_New);
   TFTPU_ADD_FN_IN_STRUCT(TpuCompiler_Free);
-
   TFTPU_ADD_FN_IN_STRUCT(TpuCompiler_RunHloPasses);
   TFTPU_ADD_FN_IN_STRUCT(TpuCompiler_RunBackend);
   TFTPU_ADD_FN_IN_STRUCT(TpuCompiler_Compile);
