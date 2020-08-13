@@ -113,7 +113,7 @@ Interpreter::Interpreter(ErrorReporter* error_reporter)
   external_contexts_[kTfLiteCpuBackendContext] =
       own_external_cpu_backend_context_.get();
 
-  UseNNAPI(false);
+  primary_subgraph().UseNNAPI(false);
 }
 
 Interpreter::~Interpreter() {
@@ -188,7 +188,16 @@ TfLiteStatus Interpreter::AllocateTensors() {
     // The execution will fall back to default implementation if the XNNPACK
     // delegate fails to be applied. Therefore, we ignore the return status
     // here and let it fall through the rest of the code.
-    ModifyGraphWithDelegate(std::move(lazy_delegate_provider_));
+    auto status = ModifyGraphWithDelegate(std::move(lazy_delegate_provider_));
+    if (status != kTfLiteOk) {
+      TF_LITE_REPORT_ERROR(
+          error_reporter_,
+          "Ignoring failed application of the default TensorFlow Lite "
+          "delegate.");
+    } else {
+      TFLITE_LOG(TFLITE_LOG_INFO,
+                 "Successfully applied the default TensorFlow Lite delegate.");
+    }
     lazy_delegate_provider_.reset();
   }
 
@@ -365,13 +374,6 @@ TfLiteStatus Interpreter::ModifyGraphWithDelegate(TfLiteDelegate* delegate) {
     TF_LITE_ENSURE_STATUS(RemoveAllDelegates());
   }
   return status;
-}
-
-TfLiteStatus Interpreter::ModifyGraphWithDelegate(TfLiteDelegatePtr delegate) {
-  // Note that we retain ownership of the delegate even if graph modification
-  // fails, as delegate use will be in an indeterminate state at that point.
-  owned_delegates_.push_back(std::move(delegate));
-  return ModifyGraphWithDelegate(owned_delegates_.back().get());
 }
 
 TfLiteStatus Interpreter::RemoveAllDelegates() {
